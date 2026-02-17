@@ -93,7 +93,7 @@ async def chat(request: ChatRequest):
 
     response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-2.0-flash",
+        model="gemini-3-flash-preview",
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -138,7 +138,7 @@ async def voice_websocket(websocket: WebSocket):
         )
 
         async with client.aio.live.connect(
-            model="gemini-2.0-flash-live-001",
+            model="gemini-3-flash-preview",
             config=config,
         ) as session:
 
