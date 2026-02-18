@@ -138,7 +138,7 @@ async def voice_websocket(websocket: WebSocket):
         )
 
         async with client.aio.live.connect(
-            model="gemini-2.5-flash-preview-native-audio",
+            model="gemini-2.5-flash-native-audio-preview-12-2025",
             config=config,
         ) as session:
 
