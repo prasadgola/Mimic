@@ -131,7 +131,7 @@ async def voice_websocket(websocket: WebSocket):
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Kore"  # A natural-sounding voice
+                        voice_name="Fenrir"  # A natural-sounding voice
                     )
                 )
             ),
