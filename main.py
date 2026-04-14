@@ -175,19 +175,21 @@ async def voice_websocket(websocket: WebSocket):
                     await session.close()
 
             async def receive_and_send_response():
-                """Receive audio from Gemini and send to client."""
                 try:
                     async for response in session.receive():
                         if response.data:
-                            # Send raw audio bytes back to client
                             await websocket.send_bytes(response.data)
 
+                        # ← ADD THIS: forward transcript text to Android
+                        if response.text:
+                            await websocket.send_text(
+                                json.dumps({"type": "transcript", "text": response.text})
+                            )
+
                         if response.server_content and response.server_content.turn_complete:
-                            # Signal turn complete to client
                             await websocket.send_text(
                                 json.dumps({"type": "turn_complete"})
                             )
-
                 except Exception as e:
                     print(f"Error receiving from Gemini: {e}")
 
