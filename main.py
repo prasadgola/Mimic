@@ -124,7 +124,7 @@ async def voice_websocket(websocket: WebSocket):
     try:
         # Create a live session with Gemini
         config = types.LiveConnectConfig(
-            response_modalities=["AUDIO", "TEXT"],
+            response_modalities=["AUDIO"],
             system_instruction=types.Content(
                 parts=[types.Part.from_text(text=SYSTEM_PROMPT)]
             ),
