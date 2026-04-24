@@ -109,20 +109,12 @@ async def chat(request: ChatRequest):
 @app.websocket("/voice")
 async def voice_websocket(websocket: WebSocket):
     """
-    WebSocket endpoint for real-time voice conversation.
-
-    Protocol:
-    - Client sends: binary audio chunks (PCM 16-bit, 16kHz, mono)
-    - Server sends: binary audio chunks back (PCM 16-bit, 24kHz, mono)
-    - Client sends: JSON {"type": "end"} to signal end of turn
-    - Client sends: JSON {"type": "close"} to close connection
+    WebSocket endpoint for real-time voice conversation compatible with Gemini 3.1.
     """
     await websocket.accept()
-
     client = get_client()
 
     try:
-        # Create a live session with Gemini
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(
@@ -131,7 +123,7 @@ async def voice_websocket(websocket: WebSocket):
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Fenrir"  # A natural-sounding voice
+                        voice_name="Fenrir" 
                     )
                 )
             ),
@@ -143,19 +135,17 @@ async def voice_websocket(websocket: WebSocket):
         ) as session:
 
             async def receive_and_forward_audio():
-                """Receive audio from client and send to Gemini."""
                 try:
                     while True:
                         data = await websocket.receive()
 
                         if "bytes" in data:
-                            # Binary audio data from client
-                            audio_bytes = data["bytes"]
+                            # 3.1 Rule: Only use realtime input during a session
                             await session.send(
                                 input=types.LiveClientRealtimeInput(
                                     media_chunks=[
                                         types.Blob(
-                                            data=audio_bytes,
+                                            data=data["bytes"],
                                             mime_type="audio/pcm;rate=16000",
                                         )
                                     ]
@@ -168,7 +158,8 @@ async def voice_websocket(websocket: WebSocket):
                                 await session.close()
                                 return
                             elif msg.get("type") == "end":
-                                # End of user's turn
+                                # 3.1 Rule: DO NOT send client_content to force turn completion. 
+                                # It will throw a 1007 error. Rely on the model's internal VAD.
                                 pass
 
                 except WebSocketDisconnect:
@@ -177,23 +168,30 @@ async def voice_websocket(websocket: WebSocket):
             async def receive_and_send_response():
                 try:
                     async for response in session.receive():
-                        if response.data:
-                            await websocket.send_bytes(response.data)
+                        
+                        # --- 3.1 FIX: Iterate over packed parts ---
+                        if response.server_content and response.server_content.model_turn:
+                            for part in response.server_content.model_turn.parts:
+                                
+                                # Process audio
+                                if part.inline_data:
+                                    await websocket.send_bytes(part.inline_data.data)
+                                    
+                                # Process text
+                                elif part.text:
+                                    await websocket.send_text(
+                                        json.dumps({"type": "transcript", "text": part.text})
+                                    )
 
-                        # ← ADD THIS: forward transcript text to Android
-                        if response.text:
-                            await websocket.send_text(
-                                json.dumps({"type": "transcript", "text": response.text})
-                            )
-
+                        # End of turn signaling remains the same
                         if response.server_content and response.server_content.turn_complete:
                             await websocket.send_text(
                                 json.dumps({"type": "turn_complete"})
                             )
+                            
                 except Exception as e:
                     print(f"Error receiving from Gemini: {e}")
 
-            # Run both tasks concurrently
             await asyncio.gather(
                 receive_and_forward_audio(),
                 receive_and_send_response(),
