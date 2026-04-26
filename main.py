@@ -113,7 +113,7 @@ async def voice_websocket(websocket: WebSocket):
 
     try:
         async with client.aio.live.connect(
-            model="gemini-3.1-flash-live-preview",
+            model="gemini-2.0-flash-exp", # Adjusted to standard live model name, change back if you have special access
             config=types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 system_instruction=types.Content(
@@ -134,7 +134,8 @@ async def voice_websocket(websocket: WebSocket):
                     while True:
                         data = await websocket.receive()
 
-                        if "bytes" in data:
+                        # FIX 1: Use .get() to check for truthy values, not just key existence
+                        if data.get("bytes"):
                             await session.send(
                                 input=types.LiveClientRealtimeInput(
                                     media_chunks=[
@@ -146,7 +147,7 @@ async def voice_websocket(websocket: WebSocket):
                                 )
                             )
 
-                        elif "text" in data:
+                        elif data.get("text"):
                             msg = json.loads(data["text"])
                             if msg.get("type") == "close":
                                 await session.close()
@@ -157,19 +158,26 @@ async def voice_websocket(websocket: WebSocket):
 
             async def send_audio_to_client():
                 async for response in session.receive():
+                    
+                    # FIX 2: Drill down into the LiveServerMessage to get the actual part data
+                    server_content = response.server_content
+                    if server_content is not None:
+                        model_turn = server_content.model_turn
+                        if model_turn is not None:
+                            for part in model_turn.parts:
+                                
+                                # 🔥 AUDIO STREAM (main output)
+                                if part.inline_data and part.inline_data.data:
+                                    await websocket.send_bytes(part.inline_data.data)
 
-                    # 🔥 AUDIO STREAM (main output)
-                    if response.data:
-                        await websocket.send_bytes(response.data)
-
-                    # optional transcript
-                    if response.text:
-                        await websocket.send_text(
-                            json.dumps({
-                                "type": "transcript",
-                                "text": response.text
-                            })
-                        )
+                                # optional transcript
+                                if part.text:
+                                    await websocket.send_text(
+                                        json.dumps({
+                                            "type": "transcript",
+                                            "text": part.text
+                                        })
+                                    )
 
             await asyncio.gather(
                 receive_audio_from_client(),
