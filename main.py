@@ -105,57 +105,41 @@ async def chat(request: ChatRequest):
     return ChatResponse(response=response.text)
 
 
-# --- Voice WebSocket Endpoint (Gemini Live API) ---
 @app.websocket("/voice")
 async def voice_websocket(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time voice conversation.
-
-    Protocol:
-    - Client sends: binary audio chunks (PCM 16-bit, 16kHz, mono)
-    - Server sends: binary audio chunks back (PCM 16-bit, 24kHz, mono)
-    - Client sends: JSON {"type": "end"} to signal end of turn
-    - Client sends: JSON {"type": "close"} to close connection
-    """
     await websocket.accept()
 
     client = get_client()
 
     try:
-        # Create a live session with Gemini
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            system_instruction=types.Content(
-                parts=[types.Part.from_text(text=SYSTEM_PROMPT)]
-            ),
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Fenrir"  # A natural-sounding voice
-                    )
-                )
-            ),
-        )
-
         async with client.aio.live.connect(
-            model="gemini-2.5-flash-native-audio-preview-12-2025",
-            config=config,
+            model="gemini-3.1-flash-live-preview",
+            config=types.LiveConnectConfig(
+                response_modalities=["AUDIO"],
+                system_instruction=types.Content(
+                    parts=[types.Part.from_text(text=SYSTEM_PROMPT)]
+                ),
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name="Fenrir"
+                        )
+                    )
+                ),
+            ),
         ) as session:
 
-            async def receive_and_forward_audio():
-                """Receive audio from client and send to Gemini."""
+            async def receive_audio_from_client():
                 try:
                     while True:
                         data = await websocket.receive()
 
                         if "bytes" in data:
-                            # Binary audio data from client
-                            audio_bytes = data["bytes"]
                             await session.send(
                                 input=types.LiveClientRealtimeInput(
                                     media_chunks=[
                                         types.Blob(
-                                            data=audio_bytes,
+                                            data=data["bytes"],
                                             mime_type="audio/pcm;rate=16000",
                                         )
                                     ]
@@ -167,42 +151,33 @@ async def voice_websocket(websocket: WebSocket):
                             if msg.get("type") == "close":
                                 await session.close()
                                 return
-                            elif msg.get("type") == "end":
-                                # End of user's turn
-                                pass
 
                 except WebSocketDisconnect:
                     await session.close()
 
-            async def receive_and_send_response():
-                try:
-                    async for response in session.receive():
-                        if response.data:
-                            await websocket.send_bytes(response.data)
+            async def send_audio_to_client():
+                async for response in session.receive():
 
-                        # ← ADD THIS: forward transcript text to Android
-                        if response.text:
-                            await websocket.send_text(
-                                json.dumps({"type": "transcript", "text": response.text})
-                            )
+                    # 🔥 AUDIO STREAM (main output)
+                    if response.data:
+                        await websocket.send_bytes(response.data)
 
-                        if response.server_content and response.server_content.turn_complete:
-                            await websocket.send_text(
-                                json.dumps({"type": "turn_complete"})
-                            )
-                except Exception as e:
-                    print(f"Error receiving from Gemini: {e}")
+                    # optional transcript
+                    if response.text:
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "transcript",
+                                "text": response.text
+                            })
+                        )
 
-            # Run both tasks concurrently
             await asyncio.gather(
-                receive_and_forward_audio(),
-                receive_and_send_response(),
+                receive_audio_from_client(),
+                send_audio_to_client(),
             )
 
-    except WebSocketDisconnect:
-        print("Client disconnected")
     except Exception as e:
-        print(f"Voice session error: {e}")
+        print("Voice error:", e)
         try:
             await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
         except:
