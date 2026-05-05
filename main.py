@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
+import traceback
 
 app = FastAPI(title="Digital Twin Server")
 
@@ -105,6 +106,7 @@ async def chat(request: ChatRequest):
 async def voice_websocket(websocket: WebSocket):
     await websocket.accept()
     client = get_client()
+    print("Voice WebSocket accepted")
 
     try:
         async with client.aio.live.connect(
@@ -123,6 +125,7 @@ async def voice_websocket(websocket: WebSocket):
                 ),
             ),
         ) as session:
+            print("Gemini Live session opened")
 
             async def receive_from_client():
                 try:
@@ -138,25 +141,40 @@ async def voice_websocket(websocket: WebSocket):
                         elif data.get("text"):
                             msg = json.loads(data["text"])
                             if msg.get("type") == "close":
+                                print("Client requested close")
                                 return
                 except WebSocketDisconnect:
-                    pass
+                    print("Client disconnected")
+                except Exception as e:
+                    print(f"receive_from_client error: {e}\n{traceback.format_exc()}")
 
             async def send_to_client():
-                async for response in session.receive():
-                    if response.server_content and response.server_content.model_turn:
-                        for part in response.server_content.model_turn.parts:
-                            if part.inline_data and part.inline_data.data:
-                                await websocket.send_bytes(part.inline_data.data)
-                            if part.text:
-                                await websocket.send_text(
-                                    json.dumps({"type": "transcript", "text": part.text})
-                                )
+                try:
+                    async for response in session.receive():
+                        # Log every response type for debugging
+                        print(f"Gemini response: {response}")
+
+                        if response.server_content and response.server_content.model_turn:
+                            for part in response.server_content.model_turn.parts:
+                                if part.inline_data and part.inline_data.data:
+                                    await websocket.send_bytes(part.inline_data.data)
+                                if part.text:
+                                    await websocket.send_text(
+                                        json.dumps({"type": "transcript", "text": part.text})
+                                    )
+
+                        # Log turn complete
+                        if response.server_content and response.server_content.turn_complete:
+                            print("Gemini turn complete")
+
+                except Exception as e:
+                    print(f"send_to_client error: {e}\n{traceback.format_exc()}")
 
             await asyncio.gather(receive_from_client(), send_to_client())
+            print("Both tasks finished — session ending")
 
     except Exception as e:
-        print(f"Connection Error: {e}")
+        print(f"Voice session error: {e}\n{traceback.format_exc()}")
         try:
             await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
         except:
