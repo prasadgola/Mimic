@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -7,6 +8,16 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types
 import traceback
+import logging
+
+# Force unbuffered stdout so Cloud Run logs appear immediately
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    force=True,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Digital Twin Server")
 
@@ -105,10 +116,13 @@ async def chat(request: ChatRequest):
 @app.websocket("/voice")
 async def voice_websocket(websocket: WebSocket):
     await websocket.accept()
+    logger.info("=== Voice WebSocket accepted ===")
+
     client = get_client()
-    print("Voice WebSocket accepted")
 
     try:
+        logger.info("Connecting to Gemini Live...")
+
         async with client.aio.live.connect(
             model="gemini-3.1-flash-live-preview",
             config=types.LiveConnectConfig(
@@ -125,7 +139,7 @@ async def voice_websocket(websocket: WebSocket):
                 ),
             ),
         ) as session:
-            print("Gemini Live session opened")
+            logger.info("=== Gemini Live session opened ===")
 
             async def receive_from_client():
                 try:
@@ -139,45 +153,53 @@ async def voice_websocket(websocket: WebSocket):
                                 )
                             )
                         elif data.get("text"):
-                            msg = json.loads(data["text"])
-                            if msg.get("type") == "close":
-                                print("Client requested close")
-                                return
+                            try:
+                                msg = json.loads(data["text"])
+                                if msg.get("type") == "close":
+                                    logger.info("Client requested close")
+                                    return
+                            except json.JSONDecodeError:
+                                pass
                 except WebSocketDisconnect:
-                    print("Client disconnected")
+                    logger.info("Client disconnected")
                 except Exception as e:
-                    print(f"receive_from_client error: {e}\n{traceback.format_exc()}")
+                    logger.error(f"receive_from_client error: {e}\n{traceback.format_exc()}")
 
             async def send_to_client():
                 try:
                     async for response in session.receive():
-                        # Log every response type for debugging
-                        print(f"Gemini response: {response}")
+                        if response.server_content:
+                            sc = response.server_content
 
-                        if response.server_content and response.server_content.model_turn:
-                            for part in response.server_content.model_turn.parts:
-                                if part.inline_data and part.inline_data.data:
-                                    await websocket.send_bytes(part.inline_data.data)
-                                if part.text:
-                                    await websocket.send_text(
-                                        json.dumps({"type": "transcript", "text": part.text})
-                                    )
+                            if sc.model_turn:
+                                for part in sc.model_turn.parts:
+                                    if part.inline_data and part.inline_data.data:
+                                        logger.info(f"Sending audio chunk: {len(part.inline_data.data)} bytes")
+                                        await websocket.send_bytes(part.inline_data.data)
+                                    if part.text:
+                                        logger.info(f"Transcript: {part.text}")
+                                        await websocket.send_text(
+                                            json.dumps({"type": "transcript", "text": part.text})
+                                        )
 
-                        # Log turn complete
-                        if response.server_content and response.server_content.turn_complete:
-                            print("Gemini turn complete")
+                            if sc.turn_complete:
+                                logger.info("Turn complete")
+
+                        elif response.tool_call:
+                            logger.info(f"Tool call received (not handled): {response.tool_call}")
 
                 except Exception as e:
-                    print(f"send_to_client error: {e}\n{traceback.format_exc()}")
+                    logger.error(f"send_to_client error: {e}\n{traceback.format_exc()}")
 
+            logger.info("Starting send/receive tasks")
             await asyncio.gather(receive_from_client(), send_to_client())
-            print("Both tasks finished — session ending")
+            logger.info("Session tasks finished")
 
     except Exception as e:
-        print(f"Voice session error: {e}\n{traceback.format_exc()}")
+        logger.error(f"=== Voice session error: {e} ===\n{traceback.format_exc()}")
         try:
             await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
-        except:
+        except Exception:
             pass
 
 
