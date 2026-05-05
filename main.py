@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,7 +16,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- System Prompt (Your Digital Twin Profile) ---
 SYSTEM_PROMPT = """You are Basavaprasad — not an AI assistant, but Basavaprasad himself responding to people.
 
 About you:
@@ -51,7 +49,7 @@ Rules:
 - Keep responses conversational and natural, not robotic
 """
 
-# --- Gemini Client ---
+
 def get_client():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -62,7 +60,7 @@ def get_client():
 # --- Text Chat Endpoint ---
 class ChatRequest(BaseModel):
     message: str
-    history: list[dict] = []  # [{"role": "user"|"model", "text": "..."}]
+    history: list[dict] = []
 
 
 class ChatResponse(BaseModel):
@@ -71,10 +69,8 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """HTTP endpoint for text-based conversation with the digital twin."""
     client = get_client()
 
-    # Build conversation history
     contents = []
     for msg in request.history:
         contents.append(
@@ -83,7 +79,6 @@ async def chat(request: ChatRequest):
                 parts=[types.Part.from_text(text=msg["text"])],
             )
         )
-    # Add current message
     contents.append(
         types.Content(
             role="user",
@@ -93,7 +88,7 @@ async def chat(request: ChatRequest):
 
     response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-3-flash-preview",
+        model="gemini-2.0-flash",
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -105,15 +100,15 @@ async def chat(request: ChatRequest):
     return ChatResponse(response=response.text)
 
 
+# --- Voice WebSocket Endpoint ---
 @app.websocket("/voice")
 async def voice_websocket(websocket: WebSocket):
     await websocket.accept()
     client = get_client()
 
     try:
-        # Use the exact 3.1 model string with the 'models/' prefix
         async with client.aio.live.connect(
-            model="models/gemini-3.1-flash-live-preview",
+            model="gemini-3.1-flash-live-preview",
             config=types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 system_instruction=types.Content(
@@ -122,7 +117,7 @@ async def voice_websocket(websocket: WebSocket):
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name="Fenrir" # Options: Fenrir, Aoede, Charon, etc.
+                            voice_name="Fenrir"
                         )
                     )
                 ),
@@ -130,41 +125,29 @@ async def voice_websocket(websocket: WebSocket):
         ) as session:
 
             async def receive_from_client():
-                """Forward audio from client to Gemini."""
                 try:
                     while True:
                         data = await websocket.receive()
                         if data.get("bytes"):
-                            await session.send(
-                                input=types.LiveClientRealtimeInput(
-                                    media_chunks=[
-                                        types.Blob(
-                                            data=data["bytes"],
-                                            mime_type="audio/pcm;rate=16000",
-                                        )
-                                    ]
+                            await session.send_realtime_input(
+                                audio=types.Blob(
+                                    data=data["bytes"],
+                                    mime_type="audio/pcm;rate=16000",
                                 )
                             )
                         elif data.get("text"):
                             msg = json.loads(data["text"])
                             if msg.get("type") == "close":
-                                await session.close()
                                 return
                 except WebSocketDisconnect:
                     pass
 
             async def send_to_client():
-                """Parse Gemini's response and send raw audio bytes to client."""
                 async for response in session.receive():
-                    # Response parsing for Gemini 3.1 Live API
-                    # The message structure is: server_content -> model_turn -> parts
                     if response.server_content and response.server_content.model_turn:
                         for part in response.server_content.model_turn.parts:
-                            # 1. Forward raw audio data
                             if part.inline_data and part.inline_data.data:
                                 await websocket.send_bytes(part.inline_data.data)
-                            
-                            # 2. Forward transcript (useful for UI)
                             if part.text:
                                 await websocket.send_text(
                                     json.dumps({"type": "transcript", "text": part.text})
