@@ -10,7 +10,6 @@ from google.genai import types
 import traceback
 import logging
 
-# Force unbuffered stdout so Cloud Run logs appear immediately
 logging.basicConfig(
     level=logging.INFO,
     stream=sys.stdout,
@@ -18,6 +17,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Log the SDK version so we know what's installed
+try:
+    import importlib.metadata
+    sdk_version = importlib.metadata.version("google-genai")
+    logger.info(f"google-genai SDK version: {sdk_version}")
+except Exception:
+    logger.info("Could not determine google-genai SDK version")
 
 app = FastAPI(title="Digital Twin Server")
 
@@ -67,6 +74,26 @@ def get_client():
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set")
     return genai.Client(api_key=api_key)
+
+
+async def send_audio_to_session(session, audio_bytes: bytes):
+    """Send audio bytes to Gemini session, compatible with old and new SDK."""
+    blob = types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
+
+    if hasattr(session, "send_realtime_input"):
+        # SDK >= 1.10
+        await session.send_realtime_input(audio=blob)
+    elif hasattr(session, "send"):
+        # Older SDK — use LiveClientRealtimeInput if available
+        try:
+            await session.send(
+                input=types.LiveClientRealtimeInput(media_chunks=[blob])
+            )
+        except Exception:
+            # Fallback: send raw blob directly
+            await session.send(input=blob)
+    else:
+        raise RuntimeError("Cannot find a valid send method on the Gemini session object")
 
 
 # --- Text Chat Endpoint ---
@@ -141,17 +168,16 @@ async def voice_websocket(websocket: WebSocket):
         ) as session:
             logger.info("=== Gemini Live session opened ===")
 
+            # Log available methods for debugging
+            session_methods = [m for m in dir(session) if not m.startswith("_")]
+            logger.info(f"Session methods: {session_methods}")
+
             async def receive_from_client():
                 try:
                     while True:
                         data = await websocket.receive()
                         if data.get("bytes"):
-                            await session.send_realtime_input(
-                                audio=types.Blob(
-                                    data=data["bytes"],
-                                    mime_type="audio/pcm;rate=16000",
-                                )
-                            )
+                            await send_audio_to_session(session, data["bytes"])
                         elif data.get("text"):
                             try:
                                 msg = json.loads(data["text"])
@@ -170,24 +196,18 @@ async def voice_websocket(websocket: WebSocket):
                     async for response in session.receive():
                         if response.server_content:
                             sc = response.server_content
-
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data and part.inline_data.data:
-                                        logger.info(f"Sending audio chunk: {len(part.inline_data.data)} bytes")
+                                        logger.info(f"Audio chunk: {len(part.inline_data.data)} bytes")
                                         await websocket.send_bytes(part.inline_data.data)
                                     if part.text:
                                         logger.info(f"Transcript: {part.text}")
                                         await websocket.send_text(
                                             json.dumps({"type": "transcript", "text": part.text})
                                         )
-
                             if sc.turn_complete:
                                 logger.info("Turn complete")
-
-                        elif response.tool_call:
-                            logger.info(f"Tool call received (not handled): {response.tool_call}")
-
                 except Exception as e:
                     logger.error(f"send_to_client error: {e}\n{traceback.format_exc()}")
 
