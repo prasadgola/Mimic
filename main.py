@@ -18,13 +18,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Log the SDK version so we know what's installed
 try:
     import importlib.metadata
     sdk_version = importlib.metadata.version("google-genai")
     logger.info(f"google-genai SDK version: {sdk_version}")
 except Exception:
-    logger.info("Could not determine google-genai SDK version")
+    pass
 
 app = FastAPI(title="Digital Twin Server")
 
@@ -77,23 +76,18 @@ def get_client():
 
 
 async def send_audio_to_session(session, audio_bytes: bytes):
-    """Send audio bytes to Gemini session, compatible with old and new SDK."""
     blob = types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
-
     if hasattr(session, "send_realtime_input"):
-        # SDK >= 1.10
         await session.send_realtime_input(audio=blob)
     elif hasattr(session, "send"):
-        # Older SDK — use LiveClientRealtimeInput if available
         try:
             await session.send(
                 input=types.LiveClientRealtimeInput(media_chunks=[blob])
             )
         except Exception:
-            # Fallback: send raw blob directly
             await session.send(input=blob)
     else:
-        raise RuntimeError("Cannot find a valid send method on the Gemini session object")
+        raise RuntimeError("No valid send method on session")
 
 
 # --- Text Chat Endpoint ---
@@ -109,25 +103,19 @@ class ChatResponse(BaseModel):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     client = get_client()
-
     contents = []
     for msg in request.history:
-        contents.append(
-            types.Content(
-                role=msg["role"],
-                parts=[types.Part.from_text(text=msg["text"])],
-            )
-        )
-    contents.append(
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=request.message)],
-        )
-    )
-
+        contents.append(types.Content(
+            role=msg["role"],
+            parts=[types.Part.from_text(text=msg["text"])],
+        ))
+    contents.append(types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=request.message)],
+    ))
     response = await asyncio.to_thread(
         client.models.generate_content,
-        model="gemini-3-flash-preview",
+        model="gemini-2.0-flash",
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -135,7 +123,6 @@ async def chat(request: ChatRequest):
             max_output_tokens=1024,
         ),
     )
-
     return ChatResponse(response=response.text)
 
 
@@ -168,10 +155,6 @@ async def voice_websocket(websocket: WebSocket):
         ) as session:
             logger.info("=== Gemini Live session opened ===")
 
-            # Log available methods for debugging
-            session_methods = [m for m in dir(session) if not m.startswith("_")]
-            logger.info(f"Session methods: {session_methods}")
-
             async def receive_from_client():
                 try:
                     while True:
@@ -194,26 +177,42 @@ async def voice_websocket(websocket: WebSocket):
             async def send_to_client():
                 try:
                     async for response in session.receive():
+
+                        # ── Path 1: direct response.data (older SDK shape) ──
+                        if hasattr(response, "data") and response.data:
+                            logger.info(f"Audio via response.data: {len(response.data)} bytes")
+                            await websocket.send_bytes(response.data)
+
+                        # ── Path 2: server_content.model_turn.parts (newer SDK shape) ──
                         if response.server_content:
                             sc = response.server_content
+
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data and part.inline_data.data:
-                                        logger.info(f"Audio chunk: {len(part.inline_data.data)} bytes")
+                                        logger.info(f"Audio via parts: {len(part.inline_data.data)} bytes")
                                         await websocket.send_bytes(part.inline_data.data)
                                     if part.text:
                                         logger.info(f"Transcript: {part.text}")
                                         await websocket.send_text(
                                             json.dumps({"type": "transcript", "text": part.text})
                                         )
+
+                            # ── CRITICAL: notify Android so it reconnects for next turn ──
                             if sc.turn_complete:
-                                logger.info("Turn complete")
+                                logger.info("Turn complete — notifying client")
+                                await websocket.send_text(
+                                    json.dumps({"type": "turn_complete"})
+                                )
+
+                except WebSocketDisconnect:
+                    logger.info("Client disconnected during send")
                 except Exception as e:
                     logger.error(f"send_to_client error: {e}\n{traceback.format_exc()}")
 
             logger.info("Starting send/receive tasks")
             await asyncio.gather(receive_from_client(), send_to_client())
-            logger.info("Session tasks finished")
+            logger.info("Session ended")
 
     except Exception as e:
         logger.error(f"=== Voice session error: {e} ===\n{traceback.format_exc()}")
