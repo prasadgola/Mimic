@@ -177,28 +177,22 @@ async def voice_websocket(websocket: WebSocket):
             async def send_to_client():
                 try:
                     async for response in session.receive():
-
-                        # ── Path 1: direct response.data (older SDK shape) ──
-                        if hasattr(response, "data") and response.data:
-                            logger.info(f"Audio via response.data: {len(response.data)} bytes")
-                            await websocket.send_bytes(response.data)
-
-                        # ── Path 2: server_content.model_turn.parts (newer SDK shape) ──
                         if response.server_content:
                             sc = response.server_content
 
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
+                                    # Send audio — parts path only, avoids double-send
                                     if part.inline_data and part.inline_data.data:
-                                        logger.info(f"Audio via parts: {len(part.inline_data.data)} bytes")
                                         await websocket.send_bytes(part.inline_data.data)
+                                    # Send transcript if present
                                     if part.text:
                                         logger.info(f"Transcript: {part.text}")
                                         await websocket.send_text(
                                             json.dumps({"type": "transcript", "text": part.text})
                                         )
 
-                            # ── CRITICAL: notify Android so it reconnects for next turn ──
+                            # Notify Android to reconnect for next turn
                             if sc.turn_complete:
                                 logger.info("Turn complete — notifying client")
                                 await websocket.send_text(
